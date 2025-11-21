@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # --- Infrastructure ---
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr 0.0.0.0:28082
+      - --advertise-pandaproxy-addr localhost:28082
+    ports:
+      - 9092:9092
+      - 29092:29092
+      - 9644:9644
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy|OK'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ecommerce_db
+    ports:
+      - 5432:5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d ecommerce_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - 9000:9000
+      - 9001:9001
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # --- Application Services ---
+  producer:
+    build: ./producer
+    container_name: producer
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER: redpanda:29092
+      TOPIC_NAME: events
+
+  processor:
+    build: ./processor
+    container_name: processor
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER: redpanda:29092
+      TOPIC_NAME: events
+      POSTGRES_URL: postgresql://user:password@postgres:5432/ecommerce_db
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+
+  api:
+    build: ./api
+    container_name: api
+    ports:
+      - 8000:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgresql://user:password@postgres:5432/ecommerce_db
+
+  dashboard:
+    build: ./dashboard
+    container_name: dashboard
+    ports:
+      - 8501:8501
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      API_URL: http://api:8000
+
+volumes:
+  redpanda-data:
+  postgres-data:
+  minio-data:
