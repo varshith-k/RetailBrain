@@ -1,58 +1,69 @@
-# Real-Time E-Commerce Analytics Platform
+# RetailBrain: AI-Powered Real-Time Commerce Intelligence
 
-This project is a full-stack Data Engineering and Backend application that simulates an e-commerce environment, processes real-time events, and visualizes sales metrics.
+RetailBrain combines data engineering, backend engineering, and an AI analytics layer.
+It streams simulated commerce events through Redpanda/Kafka, processes metrics in real time, detects anomalies, and provides a natural-language business assistant plus multi-agent style business updates.
 
 ## Architecture
 
-1.  **Producer**: Generates synthetic events (page views, add to cart, purchases) and streams them to **Redpanda** (Kafka).
-2.  **Processor**: Consumes events from Kafka, aggregates sales data in real-time, stores raw logs in **MinIO** (Data Lake), and saves aggregated stats to **PostgreSQL** (Data Warehouse).
-3.  **Backend API**: A **FastAPI** service that queries PostgreSQL and serves analytics data.
-4.  **Dashboard**: A **Streamlit** application that visualizes real-time sales trends.
+1. **Producer**: Generates synthetic commerce events with category and channel metadata.
+2. **Redpanda (Kafka API)**: Event stream backbone.
+3. **Processor**:
+   - Aggregates minute-level metrics.
+   - Builds product-level revenue trends.
+   - Detects anomalies (traffic spikes, purchase drops, abandonment spikes).
+   - Archives raw event batches to MinIO.
+4. **PostgreSQL**: Stores analytics and anomaly tables.
+5. **FastAPI**:
+   - Metrics and trending endpoints.
+   - Alert and executive summary endpoints.
+   - Natural-language analytics assistant endpoint.
+   - Multi-agent workflow endpoint for business updates.
+6. **Streamlit Dashboard**: Live charts, anomaly feed, and AI analyst chat panel.
 
 ## Tech Stack
 
--   **Language**: Python 3.9
--   **Streaming**: Redpanda (Kafka API)
--   **Storage**: PostgreSQL, MinIO (S3 Compatible)
--   **Backend**: FastAPI, SQLAlchemy
--   **Frontend**: Streamlit, Plotly
--   **Infrastructure**: Docker, Docker Compose
+- Python 3.9
+- Redpanda (Kafka compatible)
+- PostgreSQL
+- MinIO
+- FastAPI + SQLAlchemy
+- Streamlit + Plotly
+- Docker Compose
 
-## Prerequisites
+## Core Endpoints
 
--   Docker and Docker Compose installed.
+- `GET /sales`
+- `GET /metrics/overview`
+- `GET /metrics/trending-products`
+- `GET /alerts/recent`
+- `GET /reports/executive-summary`
+- `POST /assistant/query`
+- `GET /agent/business-update`
 
-## How to Run
+## Run
 
-1.  **Clone the repository** (if applicable) or navigate to the project root.
-
-2.  **Start the services**:
-    ```bash
-    docker-compose up --build
-    ```
-
-3.  **Access the services**:
-    -   **Dashboard**: [http://localhost:8501](http://localhost:8501) - View real-time charts.
-    -   **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs) - Test the API endpoints.
-    -   **MinIO Console**: [http://localhost:9001](http://localhost:9001) - Login with `minioadmin` / `minioadmin` to see raw event logs.
-
-## Project Structure
-
+```bash
+docker-compose up --build
 ```
-.
-├── api/                # FastAPI Backend
-├── dashboard/          # Streamlit Frontend
-├── producer/           # Event Generator
-├── processor/          # Stream Processor
-├── docker-compose.yml  # Infrastructure Setup
-└── README.md
-```
+
+## Access
+
+- Dashboard: http://localhost:8501
+- API docs: http://localhost:8000/docs
+- MinIO console: http://localhost:9001
+
+MinIO credentials:
+- Username: `minioadmin`
+- Password: `minioadmin`
 
 ## Data Flow
 
-1.  `producer` sends JSON events to `events` topic.
-2.  `processor` reads `events` topic.
-    -   If `purchase`, updates `sales_stats` table in Postgres.
-    -   Batches all events and uploads JSON files to `raw-events` bucket in MinIO.
-3.  `dashboard` polls `api` every 5 seconds.
-4.  `api` queries `sales_stats` table in Postgres and returns JSON.
+1. Producer publishes events to topic `events`.
+2. Processor consumes events and updates:
+   - `sales_stats`
+   - `minute_event_stats`
+   - `product_sales`
+   - `anomaly_alerts`
+3. Processor batches raw events to MinIO bucket `raw-events`.
+4. API serves live analytics and assistant workflows.
+5. Dashboard renders charts, anomalies, and AI responses.
