@@ -3,6 +3,11 @@
 RetailBrain combines data engineering, backend engineering, and an AI analytics layer.
 It streams simulated commerce events through Redpanda/Kafka, processes metrics in real time, detects anomalies, and provides a natural-language business assistant plus multi-agent style business updates.
 
+## Implementation Status
+
+- Current AI layer includes real LangChain + LangGraph runtime integration in the API service.
+- If `OPENAI_API_KEY` is not set, the system automatically falls back to deterministic local logic.
+
 ## Architecture
 
 1. **Producer**: Generates synthetic commerce events with category and channel metadata.
@@ -16,8 +21,8 @@ It streams simulated commerce events through Redpanda/Kafka, processes metrics i
 5. **FastAPI**:
    - Metrics and trending endpoints.
    - Alert and executive summary endpoints.
-   - Natural-language analytics assistant endpoint.
-   - Multi-agent workflow endpoint for business updates.
+   - Natural-language analytics assistant endpoint (LangChain SQL + LLM reasoning).
+   - Multi-agent workflow endpoint for business updates (LangGraph orchestration).
 6. **Streamlit Dashboard**: Live charts, anomaly feed, and AI analyst chat panel.
 
 ## Tech Stack
@@ -27,8 +32,28 @@ It streams simulated commerce events through Redpanda/Kafka, processes metrics i
 - PostgreSQL
 - MinIO
 - FastAPI + SQLAlchemy
+- LangChain + LangGraph + OpenAI SDK integration
 - Streamlit + Plotly
 - Docker Compose
+
+## AI Runtime Configuration
+
+Set these environment variables before running (or put them in a `.env` file used by Docker Compose):
+
+- `OPENAI_API_KEY=<your_key>`
+- `OPENAI_MODEL=gpt-4o-mini` (or another compatible model)
+- `ENABLE_REAL_AI=true`
+
+Without API key, endpoints still work using deterministic fallback logic.
+
+## Where LangChain/LangGraph Are Used
+
+- `api/ai_engine.py`
+   - `run_langchain_assistant(...)`: generates read-only SQL from natural language and explains results.
+   - `run_langgraph_business_update(...)`: executes a multi-node graph (metrics -> trend -> recommendation -> report).
+- `api/main.py`
+   - `/assistant/query` calls LangChain path first, then fallback logic if unavailable.
+   - `/agent/business-update` calls LangGraph path first, then fallback logic if unavailable.
 
 ## Core Endpoints
 

@@ -1,17 +1,20 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import List, Optional
+import os
 
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 import models
 from database import engine, get_db
 from pydantic import BaseModel
+from ai_engine import run_langchain_assistant, run_langgraph_business_update
 
 # Create tables (if not exist, though processor does it too)
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="RetailBrain Commerce Intelligence API")
+POSTGRES_URL = os.getenv('POSTGRES_URL', 'postgresql://user:password@localhost:5432/ecommerce_db')
 
 class SalesStatResponse(BaseModel):
     minute: datetime
@@ -214,6 +217,35 @@ def _assistant_business_response(question: str, db: Session):
         .all()
     )
 
+    top_product_payload = [
+        {
+            "product_id": row.product_id,
+            "category": row.category,
+            "total_revenue": _to_float(row.total_revenue),
+            "purchase_count": int(row.purchase_count or 0),
+        }
+        for row in top_products
+    ]
+    alert_payload = [
+        {
+            "alert_type": a.alert_type,
+            "severity": a.severity,
+            "message": a.message,
+            "minute": a.minute.isoformat() if a.minute else None,
+        }
+        for a in alerts
+    ]
+
+    ai_context = {
+        "overview_30": overview_30,
+        "overview_60": overview_60,
+        "top_products": top_product_payload,
+        "alerts": alert_payload,
+    }
+    ai_result = run_langchain_assistant(question, ai_context, POSTGRES_URL)
+    if ai_result:
+        return ai_result
+
     evidence = []
     next_actions = []
     trace = [
@@ -301,6 +333,35 @@ def business_update(minutes: int = 60, db: Session = Depends(get_db)):
         .limit(3)
         .all()
     )
+
+    alert_payload = [
+        {
+            "alert_type": a.alert_type,
+            "severity": a.severity,
+            "message": a.message,
+            "minute": a.minute.isoformat() if a.minute else None,
+        }
+        for a in alerts
+    ]
+    top_product_payload = [
+        {
+            "product_id": p.product_id,
+            "category": p.category,
+            "total_revenue": _to_float(p.total_revenue),
+            "purchase_count": int(p.purchase_count or 0),
+        }
+        for p in top_products
+    ]
+
+    graph_result = run_langgraph_business_update(
+        question=f"Give me a business update for the last {minutes} minutes",
+        metrics=metrics,
+        previous=previous,
+        alerts=alert_payload,
+        top_products=top_product_payload,
+    )
+    if graph_result:
+        return {"agents": graph_result, "engine": "langgraph"}
 
     metric_agent = {
         "window": minutes,

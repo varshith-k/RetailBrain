@@ -101,6 +101,9 @@ services:
         condition: service_healthy
     environment:
       POSTGRES_URL: postgresql://user:password@postgres:5432/ecommerce_db
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      ENABLE_REAL_AI: ${ENABLE_REAL_AI:-true}
 
   dashboard:
     build: ./dashboard
