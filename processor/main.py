@@ -3,10 +3,12 @@ import json
 import time
 import io
 from datetime import datetime, timedelta
+from collections import deque
 from kafka import KafkaConsumer
 import psycopg2
 from psycopg2.extras import Json
 from minio import Minio
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 # Configuration
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'localhost:9092')
@@ -15,6 +17,39 @@ POSTGRES_URL = os.getenv('POSTGRES_URL', 'postgresql://user:password@localhost:5
 MINIO_ENDPOINT = os.getenv('MINIO_ENDPOINT', 'localhost:9000')
 MINIO_ACCESS_KEY = os.getenv('MINIO_ACCESS_KEY', 'minioadmin')
 MINIO_SECRET_KEY = os.getenv('MINIO_SECRET_KEY', 'minioadmin')
+METRICS_PORT = int(os.getenv('METRICS_PORT', '9108'))
+
+EVENTS_PROCESSED_TOTAL = Counter(
+    'events_processed_total',
+    'Total number of events processed by processor',
+    ['event_type'],
+)
+EVENT_PROCESSING_DURATION_SECONDS = Histogram(
+    'event_processing_duration_seconds',
+    'Time spent processing one event',
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+)
+EVENT_INGEST_LAG_SECONDS = Histogram(
+    'event_ingest_lag_seconds',
+    'Lag between event timestamp and processor handling time',
+    buckets=(0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30, 60),
+)
+KAFKA_CONSUMER_LAG = Gauge(
+    'kafka_consumer_lag',
+    'Consumer lag by topic and partition',
+    ['topic', 'partition'],
+)
+ANOMALIES_DETECTED_TOTAL = Counter(
+    'anomalies_detected_total',
+    'Total anomalies inserted into alert table',
+    ['alert_type', 'severity'],
+)
+ANOMALY_RATE_PER_MINUTE = Gauge(
+    'anomaly_rate_per_minute',
+    'Number of anomalies detected in the rolling last minute',
+)
+
+ANOMALY_TIMESTAMPS = deque()
 
 def get_postgres_connection():
     while True:
@@ -82,6 +117,10 @@ def init_db(conn):
             UNIQUE (minute, alert_type)
         );
     """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_anomaly_alerts_minute_type
+        ON anomaly_alerts (minute, alert_type);
+    """)
     conn.commit()
     cur.close()
 
@@ -141,14 +180,32 @@ def insert_alert(cur, minute_bucket, alert_type, severity, message, details):
         INSERT INTO anomaly_alerts (minute, alert_type, severity, message, details)
         VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (minute, alert_type)
-        DO UPDATE SET
-            severity = EXCLUDED.severity,
-            message = EXCLUDED.message,
-            details = EXCLUDED.details,
-            created_at = NOW();
+        DO NOTHING;
         """,
         (minute_bucket, alert_type, severity, message, Json(details)),
     )
+    return cur.rowcount > 0
+
+
+def record_anomaly_metric(alert_type, severity):
+    now = time.time()
+    ANOMALY_TIMESTAMPS.append(now)
+    while ANOMALY_TIMESTAMPS and (now - ANOMALY_TIMESTAMPS[0]) > 60:
+        ANOMALY_TIMESTAMPS.popleft()
+    ANOMALY_RATE_PER_MINUTE.set(len(ANOMALY_TIMESTAMPS))
+    ANOMALIES_DETECTED_TOTAL.labels(alert_type=alert_type, severity=severity).inc()
+
+
+def update_kafka_lag_metrics(consumer):
+    assignment = consumer.assignment()
+    if not assignment:
+        return
+    end_offsets = consumer.end_offsets(assignment)
+    for partition in assignment:
+        end = end_offsets.get(partition, 0)
+        current = consumer.position(partition)
+        lag = max(end - current, 0)
+        KAFKA_CONSUMER_LAG.labels(topic=partition.topic, partition=str(partition.partition)).set(lag)
 
 
 def detect_anomalies(cur, minute_bucket):
@@ -190,9 +247,12 @@ def detect_anomalies(cur, minute_bucket):
         (window_start, minute_bucket),
     )
     avg_page_views, avg_purchases, avg_abandonment = cur.fetchone()
+    avg_page_views = float(avg_page_views or 0)
+    avg_purchases = float(avg_purchases or 0)
+    avg_abandonment = float(avg_abandonment or 0)
 
     if avg_page_views >= 5 and cur_page_views >= avg_page_views * 2:
-        insert_alert(
+        inserted = insert_alert(
             cur,
             minute_bucket,
             "traffic_spike",
@@ -203,9 +263,11 @@ def detect_anomalies(cur, minute_bucket):
                 "baseline_page_views": round(float(avg_page_views), 2),
             },
         )
+        if inserted:
+            record_anomaly_metric("traffic_spike", "high")
 
     if avg_purchases >= 2 and cur_purchases <= avg_purchases * 0.5:
-        insert_alert(
+        inserted = insert_alert(
             cur,
             minute_bucket,
             "purchase_drop",
@@ -216,9 +278,11 @@ def detect_anomalies(cur, minute_bucket):
                 "baseline_purchases": round(float(avg_purchases), 2),
             },
         )
+        if inserted:
+            record_anomaly_metric("purchase_drop", "high")
 
     if cur_add_to_cart >= 5 and current_abandonment >= 0.75 and current_abandonment >= (avg_abandonment * 1.5):
-        insert_alert(
+        inserted = insert_alert(
             cur,
             minute_bucket,
             "abandonment_spike",
@@ -232,8 +296,13 @@ def detect_anomalies(cur, minute_bucket):
                 "baseline_abandonment_rate": round(float(avg_abandonment), 4),
             },
         )
+        if inserted:
+            record_anomaly_metric("abandonment_spike", "medium")
 
 def process_events():
+    start_http_server(METRICS_PORT)
+    print(f"Processor metrics exposed at :{METRICS_PORT}/metrics")
+
     consumer = KafkaConsumer(
         TOPIC_NAME,
         bootstrap_servers=KAFKA_BROKER,
@@ -251,12 +320,17 @@ def process_events():
 
     print("Starting to process events...")
 
+    last_lag_update = 0
+
     for message in consumer:
+        process_start = time.perf_counter()
         event = message.value
         batch.append(event)
         timestamp = datetime.fromtimestamp(event['timestamp'])
         minute_bucket = timestamp.replace(second=0, microsecond=0)
         price = float(event.get('price', 0))
+        ingest_lag = max(time.time() - float(event.get('timestamp', time.time())), 0)
+        EVENT_INGEST_LAG_SECONDS.observe(ingest_lag)
 
         cur = pg_conn.cursor()
         upsert_minute_stats(cur, minute_bucket, event, price)
@@ -268,6 +342,13 @@ def process_events():
         detect_anomalies(cur, minute_bucket)
         pg_conn.commit()
         cur.close()
+        EVENTS_PROCESSED_TOTAL.labels(event_type=event.get('event_type', 'unknown')).inc()
+        EVENT_PROCESSING_DURATION_SECONDS.observe(time.perf_counter() - process_start)
+
+        now = time.time()
+        if (now - last_lag_update) >= 10:
+            update_kafka_lag_metrics(consumer)
+            last_lag_update = now
 
         # Archival to MinIO (Batching)
         if len(batch) >= 100 or (time.time() - last_upload_time) > 60:

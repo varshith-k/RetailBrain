@@ -76,6 +76,8 @@ docker-compose up --build
 - Dashboard: http://localhost:8501
 - API docs: http://localhost:8000/docs
 - MinIO console: http://localhost:9001
+- Prometheus: http://localhost:9090
+- Grafana: http://localhost:3000 (`admin` / `admin`)
 
 MinIO credentials:
 - Username: `minioadmin`
@@ -92,3 +94,21 @@ MinIO credentials:
 3. Processor batches raw events to MinIO bucket `raw-events`.
 4. API serves live analytics and assistant workflows.
 5. Dashboard renders charts, anomalies, and AI responses.
+
+## Monitoring (Prometheus + Grafana)
+
+The stack now includes built-in observability for:
+
+- Kafka lag: `kafka_consumer_lag`
+- Processing latency: `event_processing_duration_seconds`
+- API latency: `api_request_latency_seconds`
+- Anomaly rate: `anomalies_detected_total` and `anomaly_rate_per_minute`
+
+Preconfigured components:
+
+- Prometheus scrape config: `monitoring/prometheus.yml`
+- Grafana datasource provisioning: `monitoring/grafana/provisioning/datasources/prometheus.yml`
+- Grafana dashboard provisioning: `monitoring/grafana/provisioning/dashboards/dashboards.yml`
+- Dashboard JSON: `monitoring/grafana/dashboards/retailbrain-observability.json`
+
+After startup, open Grafana and navigate to folder `RetailBrain` to view `RetailBrain Observability`.

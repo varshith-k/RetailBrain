@@ -2,19 +2,46 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import List, Optional
 import os
+import time
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request, Response
 from sqlalchemy.orm import Session
 import models
 from database import engine, get_db
 from pydantic import BaseModel
 from ai_engine import run_langchain_assistant, run_langgraph_business_update
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 # Create tables (if not exist, though processor does it too)
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="RetailBrain Commerce Intelligence API")
 POSTGRES_URL = os.getenv('POSTGRES_URL', 'postgresql://user:password@localhost:5432/ecommerce_db')
+
+API_REQUESTS_TOTAL = Counter(
+    "api_requests_total",
+    "Total API requests",
+    ["method", "path", "status_code"],
+)
+API_REQUEST_LATENCY_SECONDS = Histogram(
+    "api_request_latency_seconds",
+    "API request latency in seconds",
+    ["method", "path"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+)
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    path = request.url.path
+    method = request.method
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed = time.perf_counter() - start
+
+    API_REQUEST_LATENCY_SECONDS.labels(method=method, path=path).observe(elapsed)
+    API_REQUESTS_TOTAL.labels(method=method, path=path, status_code=str(response.status_code)).inc()
+    return response
 
 class SalesStatResponse(BaseModel):
     minute: datetime
@@ -107,6 +134,11 @@ def _compute_overview(db: Session, minutes: int):
 @app.get("/health")
 def health_check():
     return {"status": "ok", "service": "retailbrain-api"}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/sales", response_model=List[SalesStatResponse])
 def get_sales_stats(limit: int = 100, db: Session = Depends(get_db)):
