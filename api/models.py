@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, DateTime, Numeric, Text, func
+from sqlalchemy import Column, Integer, DateTime, Numeric, Text, func, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
 
@@ -32,6 +32,7 @@ class ProductSales(Base):
 
 class AnomalyAlert(Base):
     __tablename__ = "anomaly_alerts"
+    __table_args__ = (UniqueConstraint("minute", "alert_type", name="ux_anomaly_alerts_minute_type"),)
 
     id = Column(Integer, primary_key=True, index=True)
     minute = Column(DateTime, index=True)
