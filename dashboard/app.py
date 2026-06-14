@@ -20,7 +20,7 @@ st.title("RetailBrain: Real-Time Commerce Intelligence")
 st.caption("Live metrics + anomaly feed + AI assistant for business questions")
 
 
-AI_PATHS = {"/assistant/query", "/agent/business-update"}
+AI_PATHS = {"/assistant/query", "/agent/business-update", "/refresh-data"}
 
 def fetch_json(path, params=None, method="get", payload=None):
     timeout = 120 if any(path.startswith(p) for p in AI_PATHS) else 8
@@ -42,6 +42,15 @@ def fetch_json(path, params=None, method="get", payload=None):
 auto_refresh = st.sidebar.checkbox("Auto refresh", value=True)
 refresh_seconds = st.sidebar.slider("Refresh interval (seconds)", min_value=5, max_value=30, value=5)
 time_window = st.sidebar.selectbox("Analytics window", options=[30, 60, 120], index=1)
+
+st.sidebar.divider()
+if st.sidebar.button("Refresh Demo Data", use_container_width=True, help="Re-seed all data with current timestamps"):
+    with st.sidebar:
+        with st.spinner("Regenerating data..."):
+            result = fetch_json("/refresh-data", method="post")
+    if result:
+        st.sidebar.success("Data refreshed!")
+        st.rerun()
 
 sales = fetch_json("/sales", params={"limit": 120}) or []
 overview = fetch_json("/metrics/overview", params={"minutes": time_window}) or {}

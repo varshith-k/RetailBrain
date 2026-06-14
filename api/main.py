@@ -164,6 +164,18 @@ def health_check():
     return {"status": "ok", "service": "retailbrain-api"}
 
 
+@app.post("/refresh-data")
+def refresh_data():
+    from sqlalchemy import text
+    from seed import seed_demo_data
+    with engine.begin() as conn:
+        conn.execute(text(
+            "TRUNCATE TABLE sales_stats, minute_event_stats, product_sales, anomaly_alerts"
+        ))
+    seed_demo_data(POSTGRES_URL)
+    return {"status": "ok", "message": "Data refreshed with current timestamps"}
+
+
 @app.get("/debug/db")
 def debug_db():
     from sqlalchemy import text
