@@ -21,9 +21,16 @@ _IS_THINKING_MODEL = "thinking" in AI_MODEL.lower()
 
 def _clean_sql(raw_sql: str) -> str:
     sql = raw_sql.strip()
+    # Strip markdown fences
     sql = re.sub(r"^```sql", "", sql, flags=re.IGNORECASE).strip()
     sql = re.sub(r"^```", "", sql).strip()
     sql = re.sub(r"```$", "", sql).strip()
+    # Strip common LangChain/model prefixes like "SQLQuery:" or "Answer:"
+    sql = re.sub(r"(?i)^(sql\s*query\s*:|sqlquery\s*:|query\s*:)\s*", "", sql).strip()
+    # If the model included explanatory text before the SELECT, extract from SELECT onward
+    match = re.search(r"(?i)\bSELECT\b", sql)
+    if match:
+        sql = sql[match.start():]
     sql = sql.rstrip(";")
     return sql
 

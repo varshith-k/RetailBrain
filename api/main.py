@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import List, Optional
@@ -12,11 +13,21 @@ from pydantic import BaseModel
 from ai_engine import run_langchain_assistant, run_langgraph_business_update
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
-# Create tables (if not exist, though processor does it too)
-models.Base.metadata.create_all(bind=engine)
-
-app = FastAPI(title="RetailBrain Commerce Intelligence API")
 POSTGRES_URL = os.getenv('POSTGRES_URL', 'postgresql://user:password@localhost:5432/ecommerce_db')
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    models.Base.metadata.create_all(bind=engine)
+    try:
+        from seed import seed_demo_data
+        seed_demo_data(POSTGRES_URL)
+    except Exception as e:
+        print(f"Seeder skipped: {e}")
+    yield
+
+
+app = FastAPI(title="RetailBrain Commerce Intelligence API", lifespan=lifespan)
 
 API_REQUESTS_TOTAL = Counter(
     "api_requests_total",

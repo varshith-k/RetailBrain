@@ -5,8 +5,11 @@ import plotly.express as px
 import time
 import os
 
-# Configuration
-API_URL = os.getenv('API_URL', 'http://localhost:8000')
+# Configuration — Streamlit Cloud secrets take priority over env var
+try:
+    API_URL = st.secrets["API_URL"]
+except (KeyError, FileNotFoundError):
+    API_URL = os.getenv('API_URL', 'http://localhost:8000')
 
 st.set_page_config(
     page_title="RetailBrain Commerce Intelligence",

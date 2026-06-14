@@ -1,0 +1,139 @@
+import random
+from datetime import datetime, timedelta
+
+import psycopg2
+from psycopg2.extras import Json
+
+
+def seed_demo_data(postgres_url: str) -> None:
+    conn = psycopg2.connect(postgres_url)
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM minute_event_stats")
+    if cur.fetchone()[0] > 100:
+        cur.close()
+        conn.close()
+        return
+
+    print("Seeding demo data...")
+    random.seed(42)
+    now = datetime.utcnow().replace(second=0, microsecond=0)
+
+    CATEGORIES = ["electronics", "fashion", "home", "beauty", "sports"]
+    PRICE_RANGES = {
+        "electronics": (75.0, 900.0),
+        "fashion": (20.0, 250.0),
+        "home": (15.0, 450.0),
+        "beauty": (8.0, 120.0),
+        "sports": (18.0, 500.0),
+    }
+
+    # --- 48 hours of per-minute event stats ---
+    for i in range(48 * 60):
+        minute = now - timedelta(minutes=i)
+        hour = minute.hour
+
+        if 9 <= hour <= 21:
+            base = 3.0
+        elif 6 <= hour < 9 or 21 < hour <= 23:
+            base = 1.5
+        else:
+            base = 0.5
+
+        # Inject anomalies ~5% of minutes
+        roll = random.random()
+        if roll < 0.03:
+            base_pv = base * 5        # traffic spike
+        elif roll < 0.06:
+            base_pur = 0.05           # purchase drop
+        else:
+            base_pv = base
+            base_pur = base
+
+        page_views = max(1, int(random.gauss(15 * base_pv if 'base_pv' in dir() else 15 * base, 4)))
+        add_to_cart = max(0, int(random.gauss(8 * base, 3)))
+        purchases = max(0, int(random.gauss(5 * (base_pur if 'base_pur' in dir() else base), 2)))
+        revenue = round(sum(random.uniform(20, 500) for _ in range(purchases)), 2)
+
+        # reset per-loop locals
+        base_pv = base
+        base_pur = base
+
+        cur.execute(
+            """
+            INSERT INTO minute_event_stats (minute, page_views, add_to_cart, purchases, revenue)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (minute) DO NOTHING
+            """,
+            (minute, page_views, add_to_cart, purchases, revenue),
+        )
+
+        if purchases > 0:
+            cur.execute(
+                """
+                INSERT INTO sales_stats (minute, total_sales, purchase_count)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (minute) DO NOTHING
+                """,
+                (minute, revenue, purchases),
+            )
+
+    # --- Product sales for 50 products ---
+    for product_id in range(1000, 1050):
+        category = random.choice(CATEGORIES)
+        low, high = PRICE_RANGES[category]
+        purchase_count = random.randint(3, 40)
+        total_revenue = round(sum(random.uniform(low, high) for _ in range(purchase_count)), 2)
+        last_seen = now - timedelta(minutes=random.randint(1, 120))
+
+        cur.execute(
+            """
+            INSERT INTO product_sales (product_id, category, total_revenue, purchase_count, last_purchase_at)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (product_id) DO NOTHING
+            """,
+            (product_id, category, total_revenue, purchase_count, last_seen),
+        )
+
+    # --- 20 realistic anomaly alerts ---
+    alert_specs = [
+        (
+            "purchase_drop", "high",
+            lambda d: f"Purchase drop detected: purchases are {d['current_purchases']} vs baseline {d['baseline_purchases']}.",
+            lambda: {"current_purchases": random.randint(0, 2), "baseline_purchases": round(random.uniform(20, 50), 2)},
+        ),
+        (
+            "traffic_spike", "high",
+            lambda d: f"Traffic spike detected: page views are {d['current_page_views']} vs baseline {d['baseline_page_views']}.",
+            lambda: {"current_page_views": random.randint(80, 150), "baseline_page_views": round(random.uniform(10, 20), 2)},
+        ),
+        (
+            "abandonment_spike", "medium",
+            lambda d: (
+                f"Cart abandonment spike detected: current rate "
+                f"{d['current_abandonment_rate']:.0%} vs baseline {d['baseline_abandonment_rate']:.0%}."
+            ),
+            lambda: {
+                "current_abandonment_rate": round(random.uniform(0.75, 0.95), 4),
+                "baseline_abandonment_rate": round(random.uniform(0.15, 0.35), 4),
+            },
+        ),
+    ]
+
+    for _ in range(20):
+        alert_type, severity, msg_fn, detail_fn = random.choice(alert_specs)
+        minute = now - timedelta(minutes=random.randint(5, 48 * 60))
+        details = detail_fn()
+        cur.execute(
+            """
+            INSERT INTO anomaly_alerts (minute, alert_type, severity, message, details, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (minute, alert_type) DO NOTHING
+            """,
+            (minute, alert_type, severity, msg_fn(details), Json(details), minute),
+        )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    print("Demo data seeded.")
