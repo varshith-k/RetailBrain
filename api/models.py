@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, DateTime, Numeric, Text
+from sqlalchemy import Column, Integer, DateTime, Numeric, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
 
@@ -39,4 +39,4 @@ class AnomalyAlert(Base):
     severity = Column(Text)
     message = Column(Text)
     details = Column(JSONB)
-    created_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=func.now())

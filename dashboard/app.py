@@ -17,13 +17,16 @@ st.title("RetailBrain: Real-Time Commerce Intelligence")
 st.caption("Live metrics + anomaly feed + AI assistant for business questions")
 
 
+AI_PATHS = {"/assistant/query", "/agent/business-update"}
+
 def fetch_json(path, params=None, method="get", payload=None):
+    timeout = 120 if any(path.startswith(p) for p in AI_PATHS) else 8
     try:
         url = f"{API_URL}{path}"
         if method.lower() == "post":
-            response = requests.post(url, json=payload or {}, timeout=8)
+            response = requests.post(url, json=payload or {}, timeout=timeout)
         else:
-            response = requests.get(url, params=params or {}, timeout=8)
+            response = requests.get(url, params=params or {}, timeout=timeout)
         if response.status_code == 200:
             return response.json()
         st.warning(f"{path} returned status {response.status_code}")

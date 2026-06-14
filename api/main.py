@@ -66,7 +66,7 @@ class AlertResponse(BaseModel):
     severity: str
     message: str
     details: Optional[dict] = None
-    created_at: datetime
+    created_at: Optional[datetime] = None
 
     class Config:
         orm_mode = True

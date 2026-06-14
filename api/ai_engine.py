@@ -5,14 +5,18 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from langchain.chains import create_sql_query_chain
 from langchain.prompts import ChatPromptTemplate
+from langchain_anthropic import ChatAnthropic
 from langchain_community.tools.sql_database.tool import QuerySQLDatabaseTool
 from langchain_community.utilities import SQLDatabase
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "").strip()
+AI_MODEL = os.getenv("AI_MODEL", "claude-3-5-sonnet-20241022")
 ENABLE_REAL_AI = os.getenv("ENABLE_REAL_AI", "true").lower() == "true"
+
+# Extended-thinking models require temperature=1 and a thinking budget
+_IS_THINKING_MODEL = "thinking" in AI_MODEL.lower()
 
 
 def _clean_sql(raw_sql: str) -> str:
@@ -35,10 +39,21 @@ def _is_safe_select(sql: str) -> bool:
     return True
 
 
-def _build_llm() -> Optional[ChatOpenAI]:
-    if not ENABLE_REAL_AI or not OPENAI_API_KEY:
+def _build_llm() -> Optional[ChatAnthropic]:
+    if not ENABLE_REAL_AI or not ANTHROPIC_API_KEY:
         return None
-    return ChatOpenAI(model=OPENAI_MODEL, temperature=0)
+    kwargs: Dict[str, Any] = dict(
+        model=AI_MODEL,
+        anthropic_api_key=ANTHROPIC_API_KEY,
+        max_tokens=8000,
+        temperature=1,
+    )
+    if LITELLM_BASE_URL:
+        # LiteLLM proxy exposes the Anthropic /v1/messages endpoint
+        kwargs["anthropic_api_url"] = LITELLM_BASE_URL.rstrip("/")
+    if _IS_THINKING_MODEL:
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": 5000}
+    return ChatAnthropic(**kwargs)
 
 
 def run_langchain_assistant(question: str, context: Dict[str, Any], postgres_url: str) -> Optional[Dict[str, Any]]:
@@ -53,7 +68,9 @@ def run_langchain_assistant(question: str, context: Dict[str, Any], postgres_url
         )
 
         sql_chain = create_sql_query_chain(llm, sql_db)
-        sql_query = _clean_sql(sql_chain.invoke({"question": question}))
+        raw_sql_output = sql_chain.invoke({"question": question})
+        # With thinking models, output may include a preamble — extract the SQL
+        sql_query = _clean_sql(raw_sql_output)
 
         query_result: Any = "No query executed"
         if _is_safe_select(sql_query):
@@ -68,9 +85,9 @@ def run_langchain_assistant(question: str, context: Dict[str, Any], postgres_url
                     "system",
                     (
                         "You are RetailBrain, a senior ecommerce intelligence analyst. "
-                        "Answer using only provided context and SQL evidence. "
+                        "Answer using only the provided context and SQL evidence. "
                         "Return strict JSON with keys: answer (string), evidence (array of strings), "
-                        "next_actions (array of strings)."
+                        "next_actions (array of strings). Output only the JSON object, no other text."
                     ),
                 ),
                 (
@@ -93,7 +110,19 @@ def run_langchain_assistant(question: str, context: Dict[str, Any], postgres_url
         )
         llm_output = llm.invoke(message).content
 
-        payload = json.loads(llm_output)
+        # llm_output may be a list of content blocks (thinking + text) — extract text
+        if isinstance(llm_output, list):
+            llm_output = " ".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in llm_output
+                if not (isinstance(block, dict) and block.get("type") == "thinking")
+            )
+
+        # Strip markdown fences if present
+        llm_output_clean = re.sub(r"^```json\s*", "", llm_output.strip(), flags=re.IGNORECASE)
+        llm_output_clean = re.sub(r"```$", "", llm_output_clean.strip())
+        payload = json.loads(llm_output_clean)
+
         return {
             "answer": str(payload.get("answer", "No answer generated")),
             "evidence": [
@@ -103,7 +132,7 @@ def run_langchain_assistant(question: str, context: Dict[str, Any], postgres_url
             ][:6],
             "next_actions": [str(item) for item in payload.get("next_actions", [])][:5],
             "workflow_trace": [
-                "LangChainSQLAgent: generated read-only SQL query",
+                "LangChainSQLAgent: generated read-only SQL query via Claude",
                 "LangChainSQLAgent: executed SQL against analytics tables",
                 "LLMReasoner: converted query evidence into business explanation",
             ],
@@ -111,9 +140,9 @@ def run_langchain_assistant(question: str, context: Dict[str, Any], postgres_url
     except Exception as exc:
         return {
             "answer": "AI engine fallback triggered due to runtime issue.",
-            "evidence": [f"LangChain error: {exc}"],
+            "evidence": [f"LangChain/Claude error: {exc}"],
             "next_actions": [
-                "Validate OPENAI_API_KEY and model access",
+                "Validate ANTHROPIC_API_KEY and LITELLM_BASE_URL",
                 "Retry question after service warmup",
             ],
             "workflow_trace": ["LangChainSQLAgent: failed and returned fallback payload"],
@@ -178,7 +207,7 @@ def run_langgraph_business_update(
             [
                 (
                     "system",
-                    "You are a concise executive commerce analyst. Return only one paragraph summary.",
+                    "You are a concise executive commerce analyst. Return only one paragraph summary, no other text.",
                 ),
                 (
                     "human",
@@ -201,9 +230,16 @@ def run_langgraph_business_update(
             top_products=json.dumps(state.get("top_products", []), default=str),
             actions=json.dumps(state.get("recommendation_agent", []), default=str),
         )
-        summary = llm.invoke(msg).content
-        state["report_agent"] = summary
-        state["trace"] = state.get("trace", []) + ["ReportNode: generated final executive summary"]
+        raw = llm.invoke(msg).content
+        # Extract text from potential thinking block list
+        if isinstance(raw, list):
+            raw = " ".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in raw
+                if not (isinstance(block, dict) and block.get("type") == "thinking")
+            )
+        state["report_agent"] = raw
+        state["trace"] = state.get("trace", []) + ["ReportNode: generated final executive summary via Claude"]
         return state
 
     try:
