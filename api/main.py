@@ -164,6 +164,19 @@ def health_check():
     return {"status": "ok", "service": "retailbrain-api"}
 
 
+@app.get("/debug/db")
+def debug_db():
+    from sqlalchemy import text
+    from database import POSTGRES_URL
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT COUNT(*) FROM minute_event_stats"))
+            count = result.scalar()
+        return {"db": "connected", "minute_event_stats_rows": count, "url_scheme": POSTGRES_URL.split("://")[0]}
+    except Exception as e:
+        return {"db": "error", "detail": str(e)}
+
+
 @app.get("/metrics")
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
