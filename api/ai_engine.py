@@ -3,8 +3,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional, TypedDict
 
-from langchain.chains import create_sql_query_chain
 from langchain.prompts import ChatPromptTemplate
+from langchain.schema import HumanMessage, SystemMessage
 from langchain_anthropic import ChatAnthropic
 from langchain_community.tools.sql_database.tool import QuerySQLDatabaseTool
 from langchain_community.utilities import SQLDatabase
@@ -19,19 +19,32 @@ ENABLE_REAL_AI = os.getenv("ENABLE_REAL_AI", "true").lower() == "true"
 _IS_THINKING_MODEL = "thinking" in AI_MODEL.lower()
 
 
-def _clean_sql(raw_sql: str) -> str:
-    sql = raw_sql.strip()
+def _extract_text(content: Any) -> str:
+    """Extract plain text from LLM output — handles thinking-model block lists."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in content
+            if not (isinstance(block, dict) and block.get("type") == "thinking")
+        )
+    return str(content)
+
+
+def _clean_sql(raw: str) -> str:
+    sql = _extract_text(raw).strip()
     # Strip markdown fences
     sql = re.sub(r"^```sql", "", sql, flags=re.IGNORECASE).strip()
     sql = re.sub(r"^```", "", sql).strip()
     sql = re.sub(r"```$", "", sql).strip()
-    # Strip common LangChain/model prefixes like "SQLQuery:" or "Answer:"
-    sql = re.sub(r"(?i)^(sql\s*query\s*:|sqlquery\s*:|query\s*:)\s*", "", sql).strip()
-    # If the model included explanatory text before the SELECT, extract from SELECT onward
+    # Strip common prefixes like "SQLQuery:", "Answer:", "SQL:"
+    sql = re.sub(r"(?i)^(sql\s*query\s*:|sqlquery\s*:|query\s*:|sql\s*:)\s*", "", sql).strip()
+    # If model included explanation before SELECT, extract from SELECT onward
     match = re.search(r"(?i)\bSELECT\b", sql)
     if match:
         sql = sql[match.start():]
-    sql = sql.rstrip(";")
+    sql = sql.rstrip(";").strip()
     return sql
 
 
@@ -74,10 +87,22 @@ def run_langchain_assistant(question: str, context: Dict[str, Any], postgres_url
             include_tables=["sales_stats", "minute_event_stats", "product_sales", "anomaly_alerts"],
         )
 
-        sql_chain = create_sql_query_chain(llm, sql_db)
-        raw_sql_output = sql_chain.invoke({"question": question})
-        # With thinking models, output may include a preamble — extract the SQL
-        sql_query = _clean_sql(raw_sql_output)
+        # Build SQL directly — bypasses StrOutputParser which breaks on thinking blocks
+        table_info = sql_db.get_table_info()
+        sql_gen_messages = [
+            SystemMessage(
+                content=(
+                    "You are a PostgreSQL expert. Given the table schemas below, write a "
+                    "single read-only SELECT query to answer the user's question. "
+                    "Output ONLY the raw SQL — no explanation, no markdown, no prefix."
+                )
+            ),
+            HumanMessage(
+                content=f"Tables:\n{table_info}\n\nQuestion: {question}\n\nSQL:"
+            ),
+        ]
+        sql_raw = llm.invoke(sql_gen_messages).content
+        sql_query = _clean_sql(sql_raw)
 
         query_result: Any = "No query executed"
         if _is_safe_select(sql_query):
@@ -115,15 +140,7 @@ def run_langchain_assistant(question: str, context: Dict[str, Any], postgres_url
             sql_query=sql_query,
             sql_result=str(query_result),
         )
-        llm_output = llm.invoke(message).content
-
-        # llm_output may be a list of content blocks (thinking + text) — extract text
-        if isinstance(llm_output, list):
-            llm_output = " ".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in llm_output
-                if not (isinstance(block, dict) and block.get("type") == "thinking")
-            )
+        llm_output = _extract_text(llm.invoke(message).content)
 
         # Strip markdown fences if present
         llm_output_clean = re.sub(r"^```json\s*", "", llm_output.strip(), flags=re.IGNORECASE)
@@ -237,15 +254,7 @@ def run_langgraph_business_update(
             top_products=json.dumps(state.get("top_products", []), default=str),
             actions=json.dumps(state.get("recommendation_agent", []), default=str),
         )
-        raw = llm.invoke(msg).content
-        # Extract text from potential thinking block list
-        if isinstance(raw, list):
-            raw = " ".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in raw
-                if not (isinstance(block, dict) and block.get("type") == "thinking")
-            )
-        state["report_agent"] = raw
+        state["report_agent"] = _extract_text(llm.invoke(msg).content)
         state["trace"] = state.get("trace", []) + ["ReportNode: generated final executive summary via Claude"]
         return state
 
