@@ -18,12 +18,29 @@ POSTGRES_URL = os.getenv('POSTGRES_URL', 'postgresql://user:password@localhost:5
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    models.Base.metadata.create_all(bind=engine)
+    # Railway starts PostgreSQL and the API in parallel — wait for DB to be ready
+    from sqlalchemy import text
+    for attempt in range(30):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            print("PostgreSQL ready.")
+            break
+        except Exception as exc:
+            print(f"Waiting for PostgreSQL ({attempt + 1}/30): {exc}")
+            time.sleep(3)
+
+    try:
+        models.Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        print(f"Table creation error (non-fatal): {e}")
+
     try:
         from seed import seed_demo_data
         seed_demo_data(POSTGRES_URL)
     except Exception as e:
         print(f"Seeder skipped: {e}")
+
     yield
 
 
